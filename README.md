@@ -60,7 +60,4 @@ This tool is experimental. Use at your own risk.
 ---
 
 © 2024 M-Tech
-# Linux_Ai_Agent
-# Linux_Ai_Agent
-# Linux_Ai_Agent
-# Linux_Ai_Agent
+
