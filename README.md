@@ -16,11 +16,11 @@ A desktop assistant for Linux system administration powered by Google Gemini AI 
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.10+ (tested on  Python 3.11.6)
 - PyQt6
 - psutil
 - GPUtil (optional, for GPU monitoring)
-- google-generativeai (Gemini API)
+- google-genai (Gemini API)
 - Linux OS Debian/Ubuntu (tested on Kali Linux)
 
 ## Installation
@@ -59,5 +59,5 @@ This tool is experimental. Use at your own risk.
 
 ---
 
-© 2024 M-Tech
+© 2025 M-Tech
 
