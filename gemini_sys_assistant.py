@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit,
     QLineEdit, QPushButton, QMessageBox, QInputDialog, QProgressDialog
 )
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtCore import QTimer, Qt, QEvent
 import sys
 
 try:
@@ -291,9 +291,14 @@ class GeminiSysAdminUI(QWidget):
                 color: #232042;
             }
         """)
-        self.user_trusted_commands = []
-        self.init_ui()
+        self.input_history = []
+        self.history_index = -1
+        self.cmd_history = []
+        self.history_index = -1
+        self.active_threads = []
+        self.loading_dialog = None  # Track loading dialog
         load_user_trusted_commands()
+        self.init_ui()  # <--- Added: Proper UI initialization
         self.append_output("--- Gemini Sys Admin Assistant ---", "system")
         self.append_output("This is an experimental tool. Run system commands at your own risk.", "system")
         self.append_output("Type 'exit' to quit.", "system")
@@ -326,29 +331,21 @@ class GeminiSysAdminUI(QWidget):
             border: 1px solid #635985;
         """)
         layout.addWidget(self.output_area, stretch=1)
-        # Input layout
+        # Create command input section
         input_layout = QHBoxLayout()
-        self.input_field = QLineEdit()
-        self.input_field.setStyleSheet("""
-            background-color:#393053; 
-            color:#F2F2F2; 
-            border-radius: 10px;
-            border: 1px solid #A3FFD6;
-        """)
-        input_layout.addWidget(self.input_field, stretch=4)
-        send_btn = QPushButton("Send")
-        send_btn.setStyleSheet("""
-            background-color:#A3FFD6; 
-            color:#232042; 
-            border-radius: 8px;
-            font-weight: bold;
-        """)
-        send_btn.clicked.connect(self.on_send)
-        input_layout.addWidget(send_btn, stretch=1)
+        self.command_input = QLineEdit()
+        self.command_input.installEventFilter(self)
+        self.send_button = QPushButton("Send")
+        self.clear_button = QPushButton("Clear Output")
+        input_layout.addWidget(self.command_input)
+        input_layout.addWidget(self.send_button)
+        input_layout.addWidget(self.clear_button)
         layout.addLayout(input_layout)
         self.setLayout(layout)
-        # Connect enter key press 
-        self.input_field.returnPressed.connect(self.on_send)
+        # Connect signals
+        self.send_button.clicked.connect(self.on_send)
+        self.clear_button.clicked.connect(self.clear_output)
+        self.command_input.returnPressed.connect(self.on_send)
 
     def update_monitoring(self):
         cpu = psutil.cpu_percent()
@@ -379,11 +376,16 @@ class GeminiSysAdminUI(QWidget):
         self.output_area.append(f'<span style="color:{color}; font-weight:bold;">{text}</span>')
 
     def on_send(self):
-        user_input = self.input_field.text().strip()
+        user_input = self.command_input.text().strip()
         if not user_input:
             return
         self.append_output(f"You: {user_input}", "user")
-        self.input_field.clear()
+        # ذخیره دستور در تاریخچه
+        self.input_history.append(user_input)
+        if not self.cmd_history or (self.cmd_history and self.cmd_history[-1] != user_input):
+            self.cmd_history.append(user_input)
+        self.history_index = -1
+        self.command_input.clear()
         if user_input.lower() == 'exit':
             QApplication.quit()
             return
@@ -403,7 +405,6 @@ class GeminiSysAdminUI(QWidget):
             )
             self.append_output(sys_status, "system")
             return
-
         gemini_response = ask_gemini_about_system(user_input)
         self.append_output(f"Gemini: {gemini_response}", "gemini")
         suggested_commands = re.findall(r'^COMMAND:\s*(.*)$', gemini_response, re.MULTILINE)
@@ -429,14 +430,17 @@ class GeminiSysAdminUI(QWidget):
             on_submit(None)
 
     def show_progress_popup(self, title, message):
-        progress = QProgressDialog(message, None, 0, 100, self)
+        # If already open, close it
+        if self.loading_dialog is not None:
+            self.loading_dialog.close()
+            self.loading_dialog = None
+        progress = QProgressDialog(message, None, 0, 0, self)
         progress.setWindowTitle(title)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setAutoClose(False)
-        progress.setMinimumDuration(0)  # Always show immediately
-        progress.setValue(0)            # Start at 0
+        progress.setMinimumDuration(0)
+        progress.setCancelButton(None)
         progress.setLabelText(message)
-        progress.setCancelButton(None)  # Hide cancel button for safety
         progress.setStyleSheet("""
             QProgressDialog {
                 background-color: #232042;
@@ -455,127 +459,91 @@ class GeminiSysAdminUI(QWidget):
                 width: 20px;
             }
         """)
+        progress.setValue(0)
         progress.show()
+        self.loading_dialog = progress
         return progress
 
-    def update_progress(self, progress, value):
-        progress.setValue(int(value))
-        progress.setLabelText(f"{int(value)}%")
-        QApplication.processEvents()
+    def execute_safe_command_gui(self, command):
+        """
+        Execute safe commands with QProgressDialog in indeterminate mode
+        (show until output is ready, then close it).
+        """
+        # Check Whitelist/Trusted beforehand (same as before)
+        if not self.is_command_safe(command, SAFE_COMMANDS_WHITELIST) and not self.is_command_safe(command, user_trusted_commands):
+            self.show_confirm_popup("Confirm Command Execution", f"Command '{command}' is not recognized as safe.\nDo you really want to execute it?", lambda confirmed: self._execute_command_if_confirmed(command, confirmed))
+            return
 
-    def execute_command_thread(self, command, password, progress, callback):
-        run_proc_result = [None, None]   # to store output and error
-        finished = [False]               # flag to indicate process completion
+        # Disable input until execution finishes
+        self.command_input.setEnabled(False)
+        self.send_button.setEnabled(False)
+        self.clear_button.setEnabled(False)
 
-        # Run the command in a background thread
-        def run_proc():
-            cmd = command
-            if "sudo" in cmd and "-S" not in cmd:
-                cmd = cmd.replace("sudo", "sudo -S", 1)
-            if "sudo" in cmd and password and password.strip():
-                cmd = "echo " + shlex.quote(password) + " | " + cmd
-            # Detect if command is a GUI app by including "dolphin" in the list.
-            gui_apps = ["google-chrome", "firefox", "chromium", "code", "gedit", "vlc", "nautilus", "dolphin"]
-            is_gui = False
-            for app in gui_apps:
-                if cmd.strip().startswith(app) or f" {app}" in cmd:
-                    is_gui = True
-                    break
-            if is_gui:
-                # Do not wait for the GUI app to finish;
-                # launch it detached and mark as launched.
-                subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                run_proc_result[0] = f"Launched: {command}"
-                run_proc_result[1] = ""
-                finished[0] = True
-            else:
-                proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                output, error = proc.communicate()
-                run_proc_result[0] = output
-                run_proc_result[1] = error
-                finished[0] = True
+        progress = self.show_progress_popup("Please wait", "Executing command…")
 
-        thread = threading.Thread(target=run_proc, daemon=True)
+        run_proc_result = [None, None]
+        finished = [False]
+
+        def run():
+            try:
+                proc = subprocess.run(command, shell=True, check=True, capture_output=True, text=True)
+                run_proc_result[0] = proc.stdout
+                run_proc_result[1] = proc.stderr
+            except subprocess.CalledProcessError as e:
+                run_proc_result[0] = e.stdout
+                run_proc_result[1] = e.stderr
+            except Exception as e:
+                run_proc_result[0] = ""
+                run_proc_result[1] = str(e)
+            finished[0] = True
+
+        thread = threading.Thread(target=run)
+        self.active_threads.append(thread)
         thread.start()
 
-        progress.setValue(0)
-        self._progress_value = 0
-
-        def update_loading():
+        def finish_loading():
             if finished[0]:
-                progress.setValue(100)
-                QApplication.processEvents()
+                if self.loading_dialog:
+                    self.loading_dialog.close()
+                    self.loading_dialog = None
+                if run_proc_result[0]:
+                    self.output_area.append(run_proc_result[0])
+                if run_proc_result[1]:
+                    self.output_area.append(f"Error:\n{run_proc_result[1]}")
+                if thread in self.active_threads:
+                    self.active_threads.remove(thread)
+                self.command_input.setEnabled(True)
+                self.send_button.setEnabled(True)
+                self.clear_button.setEnabled(True)
                 timer.stop()
-                progress.close()
-                class Result:
-                    pass
-                res = Result()
-                res.stdout = run_proc_result[0]
-                res.stderr = run_proc_result[1]
-                callback(res)
-            else:
-                self._progress_value = min(self._progress_value + 5, 95)
-                progress.setValue(self._progress_value)
-                QApplication.processEvents()
 
         timer = QTimer(self)
-        timer.timeout.connect(update_loading)
-        timer.start(100)
-    def execute_safe_command_gui(self, command):
-        def after_confirm(confirm):
-            if confirm:
-                def run_command(pwd):
-                    progress = self.show_progress_popup("Executing Command", "Please wait...")
-                    def finish(result):
-                        progress.close()
-                        execution_result = f"Output of '{command}':\n{result.stdout}\n{result.stderr}" if hasattr(result, "stdout") else f"Error executing '{command}':\n{result.stderr}"
-                        logging.info(f"Command '{command}' executed.")
-                        self.append_output(f"Command result:\n{execution_result}", "command")
-                    if "sudo" in command:
-                        self.execute_command_thread(command, pwd, progress, finish)
-                    else:
-                        self.execute_command_thread(command, "", progress, finish)
-                if "sudo" in command:
-                    self.show_input_popup("Sudo Authentication", "Enter your sudo password:", "", run_command)
-                else:
-                    run_command("")
-                # پیشنهاد افزودن به trusted بعد از اجرای موفق
-                def after_trust(confirm_trust):
-                    if confirm_trust:
-                        if command not in user_trusted_commands:
-                            user_trusted_commands.append(command)
-                            save_user_trusted_commands()
-                            self.append_output("Command added to trusted list.", "system")
-                        else:
-                            self.append_output("Command already in trusted list.", "system")
-                self.show_confirm_popup("Trust Command", f"Do you want to add '{command}' to your trusted commands?", after_trust)
-            else:
-                self.append_output("Command execution cancelled.", "command")
-        def after_confirm_safe(confirm):
-            if confirm:
-                def run_command(pwd):
-                    progress = self.show_progress_popup("Executing Command", "Please wait...")
-                    def finish(result):
-                        progress.close()
-                        execution_result = f"Command result:\n{result.stdout}\n{result.stderr}" if hasattr(result, "stdout") else f"Error executing '{command}':\n{result.stderr}"
-                        logging.info(f"Command '{command}' executed.")
-                        self.append_output(execution_result, "command")
-                    if "sudo" in command:
-                        self.execute_command_thread(command, pwd, progress, finish)
-                    else:
-                        self.execute_command_thread(command, "", progress, finish)
-                if "sudo" in command:
-                    self.show_input_popup("Sudo Authentication", "Enter your sudo password:", "", run_command)
-                else:
-                    run_command("")
-            else:
-                self.append_output("Command execution cancelled.", "command")
-        if not self.is_command_safe(command, SAFE_COMMANDS_WHITELIST) and not self.is_command_safe(command, user_trusted_commands):
-            self.show_confirm_popup("Confirm Command Execution", f"Command '{command}' is not recognized as safe.\nDo you really want to execute it?", after_confirm)
-        elif self.is_command_safe(command, SAFE_COMMANDS_WHITELIST) or self.is_command_safe(command, user_trusted_commands):
-            msg = f"Command '{command}' is already trusted.\nExecute it?" if self.is_command_safe(command, user_trusted_commands) else f"Are you sure you want to execute the following command?\n\n{command}"
-            self.show_confirm_popup("Confirm Command Execution", msg, after_confirm_safe)
+        timer.timeout.connect(finish_loading)
+        timer.start(200)
 
+    def clear_output(self):
+        """Clear QTextEdit output completely"""
+        self.output_area.clear()
+    
+    def closeEvent(self, event):
+        """
+        When the window is closed, wait for all active threads to finish
+        or force them if necessary. This example waits up to 3 seconds.
+        """
+        if self.active_threads:
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Closing Application")
+            msg.setText("Please wait, finishing command executions…")
+            msg.setStandardButtons(QMessageBox.StandardButton.NoButton)
+            msg.show()
+            for thread in list(self.active_threads):
+                thread.join(timeout=3)
+            msg.close()
+        if self.loading_dialog:
+            self.loading_dialog.close()
+            self.loading_dialog = None
+        event.accept()
+    
 # New main function using PyQt5
 def main():
     app = QApplication(sys.argv)
