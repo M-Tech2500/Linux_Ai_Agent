@@ -4,8 +4,9 @@ A desktop assistant for Linux system administration powered by Google Gemini AI 
 
 **Developed by [M-Tech2500](https://github.com/)**
 
+![Screenshot_20250609_174425](https://github.com/user-attachments/assets/f6df732e-7074-49e4-b11a-bcf9151f2941)
 
-![Uploading Screenshot_20250609_174425.png…]()
+
 
 
 ## Features
