@@ -218,7 +218,7 @@ def ask_gemini_about_system(query):
         client = genai.Client(
             api_key=api_key,
         )
-        model = "gemini-2.5-flash-preview-05-20"
+        model = "gemini-2.5-flash-lite-preview-06-17"
         contents = [
             types.Content(
                 role="user",
@@ -810,11 +810,16 @@ class GeminiSysAdminUI(QWidget):
                 stdout, stderr = "", str(e)
             self.finished_signal.emit(stdout, stderr)
 
-    def _run_command_gui(self, command):
-        # بررسی Whitelist/Trusted قبلش (همون‌جایی که بود)
-        if not self.is_command_safe(command, SAFE_COMMANDS_WHITELIST) and not self.is_command_safe(command, user_trusted_commands):
-            self.show_confirm_popup("Confirm Command Execution", f"Command '{command}' is not recognized as safe.\nDo you really want to execute it?", lambda confirmed: self._execute_command_if_confirmed(command, confirmed))
-            return
+    def _run_command_gui(self, command, skip_confirm=False):
+        # اگر skip_confirm=False باشد، بررسی Whitelist/Trusted و تأیید انجام می‌شود
+        if not skip_confirm:
+            if not self.is_command_safe(command, SAFE_COMMANDS_WHITELIST) and not self.is_command_safe(command, user_trusted_commands):
+                self.show_confirm_popup(
+                    "Confirm Command Execution",
+                    f"Command '{command}' is not recognized as safe.\nDo you really want to execute it?",
+                    lambda confirmed: self._execute_command_if_confirmed(command, confirmed)
+                )
+                return
 
         # اگر دستور مربوط به sudo است و گزینه -S ندارد، از کاربر رمز روت می‌گیرد.
         if "sudo" in command and "-S" not in command:
@@ -879,48 +884,25 @@ class GeminiSysAdminUI(QWidget):
         self.clear_button.setEnabled(True)
 
     def execute_safe_command_gui(self, command):
-        # بررسی Whitelist/Trusted قبلش (همون‌جایی که بود)
+        # فقط یک بار بررسی و تأیید انجام شود
         if not self.is_command_safe(command, SAFE_COMMANDS_WHITELIST) and not self.is_command_safe(command, user_trusted_commands):
-            self.show_confirm_popup("Confirm Command Execution", f"Command '{command}' is not recognized as safe.\nDo you really want to execute it?", lambda confirmed: self._execute_command_if_confirmed(command, confirmed))
+            self.show_confirm_popup(
+                "Confirm Command Execution",
+                f"Command '{command}' is not recognized as safe.\nDo you really want to execute it?",
+                lambda confirmed: self._execute_command_if_confirmed(command, confirmed)
+            )
             return
 
-        # اگر دستور مربوط به sudo است و گزینه -S ندارد، از کاربر رمز روت می‌گیرد.
-        if "sudo" in command and "-S" not in command:
-            from PyQt6.QtWidgets import QInputDialog, QLineEdit
-            password, ok = QInputDialog.getText(self, "Root Password", "Enter root password:", QLineEdit.EchoMode.Password)
-            if not ok or not password:
-                self.append_output("Password not provided. Command cancelled.", "command")
-                self.command_input.setEnabled(True)
-                self.send_button.setEnabled(True)
-                self.clear_button.setEnabled(True)
-                return
-            command = command.replace("sudo", "sudo -S", 1)
-            command = "echo " + shlex.quote(password) + " | " + command
+        # اگر تأیید شد، skip_confirm=True تا دیگر پیام نیاید
+        self._run_command_gui(command, skip_confirm=True)
 
-        # Add apt non-interactive flag if needed
-        command = transform_apt_command(command)
-        
-        # تشخیص اجرای برنامه گرافیکی و عدم نمایش لودینگ برای آن
-        gui_apps = ["google-chrome", "firefox", "chromium", "code", "gedit", "vlc", "nautilus", "dolphin"]
-        is_gui = False
-        for app in gui_apps:
-            if command.strip().startswith(app) or f" {app}" in command:
-                is_gui = True
-                break
+    def _execute_command_if_confirmed(self, command, confirmed):
+        if confirmed:
+            self._run_command_gui(command, skip_confirm=True)
+        else:
+            self.append_output("Command execution canceled.", "command")
 
-        if is_gui:
-            try:
-                subprocess.Popen(command, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                self.append_output(f"Launched: {command}", "command")
-            except Exception as e:
-                self.append_output(f"خطا:\n{str(e)}", "command")
-            self.command_input.setEnabled(True)
-            self.send_button.setEnabled(True)
-            self.clear_button.setEnabled(True)
-            return
-
-        # Use the new QThread worker instead of manual thread and timer
-        self._run_command_gui(command)
+# ...existing code...
 
     def clear_output(self):
         """Clear the output QTextEdit completely."""
@@ -958,7 +940,7 @@ class GeminiSysAdminUI(QWidget):
 
     def _execute_command_if_confirmed(self, command, confirmed):
         if confirmed:
-            self._run_command_gui(command)
+            self._run_command_gui(command, skip_confirm=True)
         else:
             self.append_output("Command execution canceled.", "command")
     
